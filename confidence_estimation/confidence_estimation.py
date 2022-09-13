@@ -12,11 +12,22 @@ from utils import rouge, sacrebleu
 
 # TODO: a single forward pass (echo while generating)
 
+CURR_DIR = Path(__file__).parent
+LANGUAGE_CODE_TO_NAME = {"de": "German", "en": "English", "ru": "Russian"}
 
-def main(model_name: str = "text-curie-001", num_examples: int = 200, src_lang: str = "en", tgt_lang: str = "de"):
-    data_dir = Path(
-        "/home/olab/tomerronen1/data/fairseq-mcrerank/dr_nmt_paper/parallel/text_data/clean_detok")
-    dump_dir = Path(__file__).parent / "metrics"
+# "text-curie-001"
+# "text-babbage-001"
+# "text-davinci-002"
+def main(model_name: str = "text-davinci-002", num_examples: int = 200, src_lang: str = "ru", tgt_lang: str = "en"):
+    if ["de", "en"] == sorted([src_lang, tgt_lang]):
+        data_dir = Path(
+            "/home/olab/tomerronen1/data/fairseq-mcrerank/dr_nmt_paper/parallel/text_data/clean_detok")
+    else:
+        data_dir = CURR_DIR / "wmt19_dev_clean" / f"newstest2018-{src_lang}{tgt_lang}"
+        if not data_dir.exists():
+            raise ValueError(f"dir {data_dir} does not exist.")
+
+    dump_dir = CURR_DIR / "metrics"
     dump_dir.mkdir(exist_ok=True, parents=True)
     dump_path = dump_dir / \
         f"wmt19_{src_lang}_to_{tgt_lang}__{model_name}__{num_examples}_examples__metrics.jsonl"
@@ -25,10 +36,10 @@ def main(model_name: str = "text-curie-001", num_examples: int = 200, src_lang: 
     source_sentences = _read_lines(data_dir / f"valid.{src_lang}")
     target_sentences = _read_lines(data_dir / f"valid.{tgt_lang}")
 
-    task_prompt = {"de": "Translate German to English: ",
-                   "en": "Translate English to German: "}[src_lang]
+    task_prompt = f"Translate {LANGUAGE_CODE_TO_NAME[src_lang]} to {LANGUAGE_CODE_TO_NAME[tgt_lang]}: "
     echo_prompt = {"de": "Schreibe einen Satz: ",
-                   "en": "Write a sentence: "}[src_lang]
+                   "en": "Write a sentence: ",
+                   "ru": "пожалуйста, напишите предложение: "}[src_lang]
     openai_caller = OpenAICaller(model_name, task_prompt, echo_prompt)
 
     example_indices = np.random.RandomState(seed=1337).permutation(
@@ -72,6 +83,7 @@ class OpenAICaller:
         self.echo_prompt = echo_prompt
 
     def predict(self, input_text: str) -> tuple[str, float, float]:
+        input_text = input_text.replace('"', '')
         inference_response = self._make_inference_call(input_text)
         echo_response = self._make_echo_call(input_text)
         pred_text, pred_perplexity = _process_response(inference_response)
@@ -80,7 +92,7 @@ class OpenAICaller:
 
     def _make_inference_call(self, input_text: str) -> OpenAIObject:
         max_tokens = len(input_text.split()) * 2
-        inference_request_text = f'{self.task_prompt}"{input_text}"'
+        inference_request_text = f'{self.task_prompt}" {input_text} "'
         inference_response = openai.Completion.create(
             model=self.model_name,
             prompt=inference_request_text,
@@ -88,7 +100,7 @@ class OpenAICaller:
         return inference_response
 
     def _make_echo_call(self, input_text: str) -> OpenAIObject:
-        echo_request_text = f'{self.echo_prompt}"{input_text}"'
+        echo_request_text = f'{self.echo_prompt}" {input_text} "'
         echo_response = openai.Completion.create(
             model=self.model_name,
             prompt=echo_request_text,
@@ -98,7 +110,7 @@ class OpenAICaller:
 
 def _process_response(response: OpenAIObject) -> tuple[str, float]:
     tokens, logprobs = _extract_quoted_tokens(response)
-    text = ''.join(tokens)
+    text = ''.join(tokens).strip()
     avg_logprob = np.mean(logprobs)
     return text, avg_logprob
 
