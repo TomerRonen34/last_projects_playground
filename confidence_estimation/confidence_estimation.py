@@ -1,4 +1,4 @@
-import json
+import jsonlines
 from pathlib import Path
 
 import numpy as np
@@ -8,46 +8,51 @@ from openai.openai_object import OpenAIObject
 from tqdm import tqdm
 from time import sleep
 
-from utils import sacrebleu
+from utils import rouge, sacrebleu
 
-DEUTCH_WRITE_A_SENTENCE = "Schreibe einen Satz: "
+# TODO: a single forward pass (echo while generating)
 
 
-def main(model_name: str = "text-curie-001", num_examples: int = 200):
+def main(model_name: str = "text-curie-001", num_examples: int = 200, src_lang: str = "en", tgt_lang: str = "de"):
     data_dir = Path(
         "/home/olab/tomerronen1/data/fairseq-mcrerank/dr_nmt_paper/parallel/text_data/clean_detok")
     dump_dir = Path(__file__).parent / "metrics"
     dump_dir.mkdir(exist_ok=True, parents=True)
     dump_path = dump_dir / \
-        f"AAA_wmt19_de_to_en__{model_name}__{num_examples}_examples__metrics.json"
+        f"wmt19_{src_lang}_to_{tgt_lang}__{model_name}__{num_examples}_examples__metrics.jsonl"
+    assert not dump_path.exists()
 
-    english_sentences = _read_lines(data_dir / "valid.en")
-    deutch_sentences = _read_lines(data_dir / "valid.de")
+    source_sentences = _read_lines(data_dir / f"valid.{src_lang}")
+    target_sentences = _read_lines(data_dir / f"valid.{tgt_lang}")
 
-    openai_caller = OpenAICaller(model_name=model_name)
+    task_prompt = {"de": "Translate German to English: ",
+                   "en": "Translate English to German: "}[src_lang]
+    echo_prompt = {"de": "Schreibe einen Satz: ",
+                   "en": "Write a sentence: "}[src_lang]
+    openai_caller = OpenAICaller(model_name, task_prompt, echo_prompt)
 
-    metrics = {
-        "i_example": [],
-        "pred_perplexity": [],
-        "echo_perplexity": [],
-        "bleu_score": [],
-    }
     example_indices = np.random.RandomState(seed=1337).permutation(
-        len(english_sentences))[:num_examples]
+        len(source_sentences))[:num_examples]
     for i_example in tqdm(example_indices):
         pred_text, pred_perplexity, echo_perplexity = openai_caller.predict(
-            deutch_sentences[i_example])
-        sleep(5)
+            source_sentences[i_example])
         bleu_score = sacrebleu(
-            pred=pred_text, label=english_sentences[i_example])
-
-        metrics["i_example"].append(int(i_example))
-        metrics["pred_perplexity"].append(pred_perplexity)
-        metrics["echo_perplexity"].append(echo_perplexity)
-        metrics["bleu_score"].append(bleu_score)
-
-    with open(dump_path, 'w') as f:
-        json.dump(metrics, f, indent=2)
+            pred=pred_text, label=target_sentences[i_example])
+        rougeL_score = rouge(
+            pred=pred_text, label=target_sentences[i_example], rouge_key="rougeL")
+        rouge2_score = rouge(
+            pred=pred_text, label=target_sentences[i_example], rouge_key="rouge2")
+        metrics = {
+            "i_example": int(i_example),
+            "pred_perplexity": pred_perplexity,
+            "echo_perplexity": echo_perplexity,
+            "bleu_score": bleu_score,
+            "rougeL_score": rougeL_score,
+            "rouge2_score": rouge2_score,
+        }
+        with jsonlines.open(dump_path, 'a') as f:
+            f.write(metrics)
+        sleep(5)
 
 
 def _read_lines(path: Path) -> list[str]:
@@ -58,9 +63,9 @@ def _read_lines(path: Path) -> list[str]:
 
 class OpenAICaller:
     def __init__(self,
-                 model_name: str = "text-babbage-001",
-                 task_prompt: str = "Translate German to English: ",
-                 echo_prompt: str = DEUTCH_WRITE_A_SENTENCE,
+                 model_name: str,
+                 task_prompt: str,
+                 echo_prompt: str,
                  ):
         self.model_name = model_name
         self.task_prompt = task_prompt
