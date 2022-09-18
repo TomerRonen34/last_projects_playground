@@ -6,7 +6,7 @@ from pathlib import Path
 import ftfy
 
 
-def main(subset_name: str = "newstest", year: int = 2018, src_lang: str = "ru", tgt_lang: str = "en"):
+def main(subset_name: str = "newstest", year: int = 2018, src_lang: str = "tr", tgt_lang: str = "en"):
     curr_dir = Path(__file__).parent
     data_dir = curr_dir / "wmt19_dev"
     dump_dir = curr_dir / "wmt19_dev_clean"
