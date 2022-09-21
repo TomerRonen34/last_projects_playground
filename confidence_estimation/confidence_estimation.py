@@ -24,14 +24,12 @@ LANGUAGE_CODE_TO_NAME = {"de": "German", "en": "English", "ru": "Russian", "tr":
 
 
 def main(model_name: str = "text-davinci-002", num_examples: int = 200, src_lang: str = "ru", tgt_lang: str = "en"):
-    if ["de", "en"] == sorted([src_lang, tgt_lang]):
-        data_dir = Path(
-            "/home/olab/tomerronen1/data/fairseq-mcrerank/dr_nmt_paper/parallel/text_data/clean_detok")
-    else:
-        data_dir = CURR_DIR / "wmt19_dev_clean" / \
-            f"newstest2018-{src_lang}{tgt_lang}"
-        if not data_dir.exists():
-            raise ValueError(f"dir {data_dir} does not exist.")
+    # if ["de", "en"] == sorted([src_lang, tgt_lang]):
+    #     data_dir = Path(
+    #         "/home/olab/tomerronen1/data/fairseq-mcrerank/dr_nmt_paper/parallel/text_data/clean_detok")
+    data_dir = CURR_DIR / "wmt19_dev_clean" / f"newstest2018-{src_lang}{tgt_lang}"
+    if not data_dir.exists():
+        raise ValueError(f"dir {data_dir} does not exist.")
 
     dump_dir = CURR_DIR / "openai_dump" / f"wmt19_{src_lang}_to_{tgt_lang}__{model_name}__{num_examples}_examples"
     metrics_dump_path = dump_dir / "metrics.jsonl"
