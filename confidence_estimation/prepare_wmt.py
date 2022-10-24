@@ -4,9 +4,15 @@
 
 from pathlib import Path
 import ftfy
+from fire import Fire
 
 
-def main(subset_name: str = "newstest", year: int = 2018, src_lang: str = "de", tgt_lang: str = "en"):
+def main(subset_name: str = "newstest", year: int = 2018, src_lang: str = "en", tgt_lang: str = "ru"):
+    """
+    python prepare_wmt.py --src_lang=en   --tgt_lang=fi
+    python prepare_wmt.py --src_lang=en   --tgt_lang=tr
+    """
+
     curr_dir = Path(__file__).parent
     data_dir = curr_dir / "wmt19_dev"
     dump_dir = curr_dir / "wmt19_dev_clean"
@@ -51,4 +57,4 @@ def _dump_sentence_file(sentences: list[str], lang: str, dump_dir: Path) -> None
 
 
 if __name__ == "__main__":
-    main()
+    Fire(main)

@@ -1,5 +1,4 @@
-from http.client import UnimplementedFileMode
-from typing import Callable
+from typing import Optional, Union
 import jsonlines
 from pathlib import Path
 
@@ -10,28 +9,41 @@ from fire import Fire
 from openai.openai_object import OpenAIObject
 from tqdm import tqdm
 from time import sleep
+import re
 
 from utils import rouge, sacrebleu
 
 # TODO: a single forward pass (echo while generating)
 
 CURR_DIR = Path(__file__).parent
-LANGUAGE_CODE_TO_NAME = {"de": "German", "en": "English", "ru": "Russian", "tr": "Turkish", "fi": "Finnish"}
+LANGUAGE_CODE_TO_NAME = {"de": "German", "en": "English",
+                         "ru": "Russian", "tr": "Turkish", "fi": "Finnish"}
 
 # "text-curie-001"
 # "text-babbage-001"
 # "text-davinci-002"
 
 
-def main(model_name: str = "text-davinci-002", num_examples: int = 200, src_lang: str = "ru", tgt_lang: str = "en"):
-    # if ["de", "en"] == sorted([src_lang, tgt_lang]):
-    #     data_dir = Path(
-    #         "/home/olab/tomerronen1/data/fairseq-mcrerank/dr_nmt_paper/parallel/text_data/clean_detok")
-    data_dir = CURR_DIR / "wmt19_dev_clean" / f"newstest2018-{src_lang}{tgt_lang}"
+def main(model_name: str = "text-davinci-002", num_examples: int = 200, src_lang: str = None, tgt_lang: str = None,
+         backtranslation_dir: Optional[str] = None):
+    """
+    python confidence_estimation.py --src_lang=en --tgt_lang=fi
+    python confidence_estimation.py --backtranslation_dir="/home/olab/tomerronen1/git_repos/last_projects_playground/confidence_estimation/openai_dump/wmt19_en_to_fi__text-davinci-002__200_examples"
+    """
+    if backtranslation_dir is None:
+        assert (src_lang is not None) and (tgt_lang is not None)
+        data_dir = CURR_DIR / "wmt19_dev_clean" / \
+            f"newstest2018-{src_lang}{tgt_lang}"
+        dump_dir = CURR_DIR / "openai_dump" / \
+            f"wmt19_{src_lang}_to_{tgt_lang}__{model_name}__{num_examples}_examples"
+    else:
+        if backtranslation_dir is not None:
+            assert (src_lang is None) and (tgt_lang is None)
+        data_dir, dump_dir, src_lang, tgt_lang = _prepare_backtranslation(backtranslation_dir)
+    
     if not data_dir.exists():
         raise ValueError(f"dir {data_dir} does not exist.")
 
-    dump_dir = CURR_DIR / "openai_dump" / f"wmt19_{src_lang}_to_{tgt_lang}__{model_name}__{num_examples}_examples"
     metrics_dump_path = dump_dir / "metrics.jsonl"
     responses_dump_path = dump_dir / "responses.jsonl"
     sentences_dump_path = dump_dir / "sentences.jsonl"
@@ -44,7 +56,8 @@ def main(model_name: str = "text-davinci-002", num_examples: int = 200, src_lang
         print("\n\nAlready queried and dumped that data")
         return
     elif dump_dir.exists():
-        raise ValueError(f"dump dir exists but contains only {num_dumped} out of {num_examples} examples - '{dump_dir}'")
+        raise ValueError(
+            f"dump dir exists but contains only {num_dumped} out of {num_examples} examples - '{dump_dir}'")
     dump_dir.mkdir(exist_ok=False, parents=True)
 
     source_sentences = _read_lines(data_dir / f"valid.{src_lang}")
@@ -53,12 +66,17 @@ def main(model_name: str = "text-davinci-002", num_examples: int = 200, src_lang
     task_prompt = f"Translate {LANGUAGE_CODE_TO_NAME[src_lang]} to {LANGUAGE_CODE_TO_NAME[tgt_lang]}:"
     openai_caller = OpenAICaller(model_name, task_prompt)
 
-    example_indices = np.random.RandomState(seed=1337).permutation(
-        len(source_sentences))[:num_examples]
+    if len(source_sentences) > num_examples:
+        example_indices = np.random.RandomState(seed=1337).permutation(
+            len(source_sentences))[:num_examples]
+    else:
+        example_indices =  np.arange(len(source_sentences))
+
     for i_example in tqdm(example_indices):
         input_text = source_sentences[i_example]
         target_text = target_sentences[i_example]
-        pred_text, pred_perplexity, echo_perplexity, response_json = openai_caller.predict(input_text)
+        pred_text, pred_perplexity, echo_perplexity, response_json = openai_caller.predict(
+            input_text)
         bleu_score = sacrebleu(
             pred=pred_text, label=target_text)
         rougeL_score = rouge(
@@ -96,6 +114,13 @@ def _read_lines(path: Path) -> list[str]:
     text = path.read_text()
     lines = text.strip().split('\n')
     return lines
+
+
+def _write_lines(lines: list[str], path: Path) -> None:
+    lines = [line.replace('\n', ' ') for line in lines]
+    text = '\n'.join(lines) + '\n'
+    path.parent.mkdir(exist_ok=True, parents=True)
+    path.write_text(text)
 
 
 class OpenAICaller:
@@ -168,6 +193,24 @@ def _find_pred_boundary(tokens: list[str]) -> tuple[int, int]:
     else:
         i_end = len(tokens)
     return i_start, i_end
+
+
+def _prepare_backtranslation(backtranslation_dir: Union[str, Path]) -> tuple[Path, Path, str, str]:
+    backtranslation_dir = Path(backtranslation_dir)
+    assert backtranslation_dir.exists()
+
+    orig_src_lang, orig_tgt_lang = re.findall("(\w\w)_to_(\w\w)", backtranslation_dir.name)[0]
+    src_lang, tgt_lang = orig_tgt_lang, orig_src_lang
+    data_dir = backtranslation_dir / "backtranslation" / "data"
+    dump_dir = backtranslation_dir / "backtranslation" / "dump"
+
+    with jsonlines.open(backtranslation_dir / "sentences.jsonl", 'r') as reader:
+        sentences = list(reader.iter())
+    pred_sentences, input_sentences = zip(*[(row["pred_text"], row["input_text"]) for row in sentences])
+    _write_lines(pred_sentences, data_dir / f"valid.{orig_tgt_lang}")
+    _write_lines(input_sentences, data_dir / f"valid.{orig_src_lang}")
+
+    return data_dir, dump_dir, src_lang, tgt_lang
 
 
 if __name__ == "__main__":
