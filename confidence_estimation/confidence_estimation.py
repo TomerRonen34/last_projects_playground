@@ -28,7 +28,11 @@ def main(model_name: str = "text-davinci-002", num_examples: int = 200, src_lang
          backtranslation_dir: Optional[str] = None):
     """
     python confidence_estimation.py --src_lang=en --tgt_lang=fi
+    python confidence_estimation.py --src_lang=en --tgt_lang=tr
     python confidence_estimation.py --backtranslation_dir="/home/olab/tomerronen1/git_repos/last_projects_playground/confidence_estimation/openai_dump/wmt19_en_to_fi__text-davinci-002__200_examples"
+    python confidence_estimation.py --backtranslation_dir="/home/olab/tomerronen1/git_repos/last_projects_playground/confidence_estimation/openai_dump/wmt19_fi_to_en__text-davinci-002__200_examples"
+    python confidence_estimation.py --backtranslation_dir="/home/olab/tomerronen1/git_repos/last_projects_playground/confidence_estimation/openai_dump/wmt19_tr_to_en__text-davinci-002__200_examples"
+    sleep 1800 && python confidence_estimation.py --backtranslation_dir="/home/olab/tomerronen1/git_repos/last_projects_playground/confidence_estimation/openai_dump/wmt19_en_to_tr__text-davinci-002__200_examples"
     """
     if backtranslation_dir is None:
         assert (src_lang is not None) and (tgt_lang is not None)
