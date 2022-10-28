@@ -17,7 +17,8 @@ from utils import rouge, sacrebleu
 
 CURR_DIR = Path(__file__).parent
 LANGUAGE_CODE_TO_NAME = {"de": "German", "en": "English",
-                         "ru": "Russian", "tr": "Turkish", "fi": "Finnish"}
+                         "ru": "Russian", "tr": "Turkish", "fi": "Finnish",
+                         "zh": "Chinese", "et": "Estonian", "cs": "Czech"}
 
 # "text-curie-001"
 # "text-babbage-001"
@@ -25,7 +26,7 @@ LANGUAGE_CODE_TO_NAME = {"de": "German", "en": "English",
 
 
 def main(model_name: str = "text-davinci-002", num_examples: int = 200, src_lang: str = None, tgt_lang: str = None,
-         backtranslation_dir: Optional[str] = None):
+         backtranslation_dir: Optional[str] = None, also_backtranslate: bool = False) -> None:
     """
     python confidence_estimation.py --src_lang=en --tgt_lang=fi
     python confidence_estimation.py --src_lang=en --tgt_lang=tr
@@ -33,18 +34,30 @@ def main(model_name: str = "text-davinci-002", num_examples: int = 200, src_lang
     python confidence_estimation.py --backtranslation_dir="/home/olab/tomerronen1/git_repos/last_projects_playground/confidence_estimation/openai_dump/wmt19_fi_to_en__text-davinci-002__200_examples"
     python confidence_estimation.py --backtranslation_dir="/home/olab/tomerronen1/git_repos/last_projects_playground/confidence_estimation/openai_dump/wmt19_tr_to_en__text-davinci-002__200_examples"
     sleep 1800 && python confidence_estimation.py --backtranslation_dir="/home/olab/tomerronen1/git_repos/last_projects_playground/confidence_estimation/openai_dump/wmt19_en_to_tr__text-davinci-002__200_examples"
+    
+    python confidence_estimation.py --src_lang=en --tgt_lang=cs --also_backtranslate=True && \
+    python confidence_estimation.py --src_lang=en --tgt_lang=de --also_backtranslate=True && \
+    python confidence_estimation.py --src_lang=en --tgt_lang=et --also_backtranslate=True
     """
+    _main(model_name, num_examples, src_lang, tgt_lang, backtranslation_dir)
+    if also_backtranslate:
+        assert backtranslation_dir is None
+        dump_dir = _dump_dir_path(src_lang, tgt_lang, model_name, num_examples)
+        _main(model_name, num_examples, src_lang=None, tgt_lang=None, backtranslation_dir=dump_dir)
+
+
+def _main(model_name: str, num_examples: int, src_lang: str, tgt_lang: str, backtranslation_dir: Optional[str]) -> None:
     if backtranslation_dir is None:
         assert (src_lang is not None) and (tgt_lang is not None)
         data_dir = CURR_DIR / "wmt19_dev_clean" / \
             f"newstest2018-{src_lang}{tgt_lang}"
-        dump_dir = CURR_DIR / "openai_dump" / \
-            f"wmt19_{src_lang}_to_{tgt_lang}__{model_name}__{num_examples}_examples"
+        dump_dir = _dump_dir_path(src_lang, tgt_lang, model_name, num_examples)
     else:
         if backtranslation_dir is not None:
             assert (src_lang is None) and (tgt_lang is None)
-        data_dir, dump_dir, src_lang, tgt_lang = _prepare_backtranslation(backtranslation_dir)
-    
+        data_dir, dump_dir, src_lang, tgt_lang = _prepare_backtranslation(
+            backtranslation_dir)
+
     if not data_dir.exists():
         raise ValueError(f"dir {data_dir} does not exist.")
 
@@ -74,7 +87,7 @@ def main(model_name: str = "text-davinci-002", num_examples: int = 200, src_lang
         example_indices = np.random.RandomState(seed=1337).permutation(
             len(source_sentences))[:num_examples]
     else:
-        example_indices =  np.arange(len(source_sentences))
+        example_indices = np.arange(len(source_sentences))
 
     for i_example in tqdm(example_indices):
         input_text = source_sentences[i_example]
@@ -112,6 +125,10 @@ def main(model_name: str = "text-davinci-002", num_examples: int = 200, src_lang
         with jsonlines.open(sentences_dump_path, 'a') as f:
             f.write(sentences)
         sleep(4)
+
+
+def _dump_dir_path(src_lang, tgt_lang, model_name, num_examples) -> Path:
+    return CURR_DIR / "openai_dump" / f"wmt19_{src_lang}_to_{tgt_lang}__{model_name}__{num_examples}_examples"
 
 
 def _read_lines(path: Path) -> list[str]:
@@ -203,14 +220,16 @@ def _prepare_backtranslation(backtranslation_dir: Union[str, Path]) -> tuple[Pat
     backtranslation_dir = Path(backtranslation_dir)
     assert backtranslation_dir.exists()
 
-    orig_src_lang, orig_tgt_lang = re.findall("(\w\w)_to_(\w\w)", backtranslation_dir.name)[0]
+    orig_src_lang, orig_tgt_lang = re.findall(
+        "(\w\w)_to_(\w\w)", backtranslation_dir.name)[0]
     src_lang, tgt_lang = orig_tgt_lang, orig_src_lang
     data_dir = backtranslation_dir / "backtranslation" / "data"
     dump_dir = backtranslation_dir / "backtranslation" / "dump"
 
     with jsonlines.open(backtranslation_dir / "sentences.jsonl", 'r') as reader:
         sentences = list(reader.iter())
-    pred_sentences, input_sentences = zip(*[(row["pred_text"], row["input_text"]) for row in sentences])
+    pred_sentences, input_sentences = zip(
+        *[(row["pred_text"], row["input_text"]) for row in sentences])
     _write_lines(pred_sentences, data_dir / f"valid.{orig_tgt_lang}")
     _write_lines(input_sentences, data_dir / f"valid.{orig_src_lang}")
 

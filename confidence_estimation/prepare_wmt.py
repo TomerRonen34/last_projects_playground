@@ -11,6 +11,11 @@ def main(subset_name: str = "newstest", year: int = 2018, src_lang: str = "en", 
     """
     python prepare_wmt.py --src_lang=en   --tgt_lang=fi
     python prepare_wmt.py --src_lang=en   --tgt_lang=tr
+
+    python prepare_wmt.py --src_lang=en   --tgt_lang=cs && \
+    python prepare_wmt.py --src_lang=en   --tgt_lang=de && \
+    python prepare_wmt.py --src_lang=en   --tgt_lang=et && \
+    python prepare_wmt.py --src_lang=en   --tgt_lang=zh
     """
 
     curr_dir = Path(__file__).parent
