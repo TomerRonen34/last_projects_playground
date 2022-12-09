@@ -1,10 +1,10 @@
-from functools import partial
 from pathlib import Path
 from typing import Optional, Union
 
 import bert_score
 import jsonlines
 import numpy as np
+import torch
 from bert_score import BERTScorer
 from datasets import Dataset
 from fire import Fire
@@ -19,19 +19,22 @@ from utils import (batch_indices, dict_of_lists_to_list_of_dicts, read_lines,
 
 LANG_CODE_TO_FAIRSEQ_FORMAT = {
     long_language_code[:2]: long_language_code for long_language_code in FAIRSEQ_LANGUAGE_CODES}
+LABEL_PAD = -100
 
 
 class MBart50Translator:
     """
     python -m mbart50_translate --device="cpu" --num_examples=10 --batch_size=2 --data_dir="data/wmt20" --dump_dir="mbart50_dumps" --src_lang="en" --tgt_lang="de"
     GPUS=1 run_with_slurm gen $(which run_python_script) -m mbart50_translate  --num_examples=10 --data_dir="data/wmt20" --dump_dir="mbart50_dumps" --src_lang="en" --tgt_lang="ru"
-    GPUS=1 run_with_slurm gen $(which run_python_script) -m mbart50_translate  --num_examples=10 --data_dir="data/wmt20" --dump_dir="mbart50_dumps" --src_lang="ru" --tgt_lang="en"
+    GPUS=1 run_with_slurm gen $(which run_python_script) -m mbart50_translate  --is_backtranslation=True  --num_examples=10 --data_dir="data/wmt20" --dump_dir="mbart50_dumps" --src_lang="en" --tgt_lang="ru"
+    python -m mbart50_translate  --device=cpu  --is_backtranslation=True  --num_examples=10 --data_dir="data/wmt20" --dump_dir="mbart50_dumps" --src_lang="en" --tgt_lang="ta"
     """
 
     def __init__(self,
                  data_dir: str,
                  src_lang: str,
                  tgt_lang: str,
+                 is_backtranslation: bool = False,
                  dump_dir: str = "mbart50_dumps",
                  num_examples: Optional[int] = 200,
                  batch_size: int = 4,
@@ -46,6 +49,17 @@ class MBart50Translator:
         assert "en" in (src_lang, tgt_lang)
         assert {src_lang, tgt_lang}.issubset(
             LANG_CODE_TO_FAIRSEQ_FORMAT.keys())
+
+        self.is_backtranslation = is_backtranslation
+        self.orig_dump_path = None
+        self.key_prefix = ''
+        if self.is_backtranslation:
+            _, self.orig_dump_path = self._build_paths(
+                dump_dir, dataset_name, src_lang, tgt_lang, num_examples, is_backtranslation=False)
+            assert self.orig_dump_path.exists(), self.orig_dump_path
+            src_lang, tgt_lang = tgt_lang, src_lang
+            self.key_prefix = "bt_"
+
         self.data_dir = Path(data_dir)
         self.src_lang = src_lang
         self.tgt_lang = tgt_lang
@@ -56,13 +70,11 @@ class MBart50Translator:
         self.dataset_name = dataset_name
         self.max_output_to_input_ratio = max_output_to_input_ratio
 
-        self.generations_dump_path = Path(
-            dump_dir) / f"{dataset_name}_{src_lang}-{tgt_lang}_{num_examples}examples.jsonl"
-        self.metrics_dump_path = self.generations_dump_path.with_suffix(
-            ".with_metrics.jsonl")
+        self.generations_dump_path, self.metrics_dump_path = self._build_paths(
+            dump_dir, dataset_name, src_lang, tgt_lang, num_examples, is_backtranslation)
 
         if generate_multiple_options == "auto":
-            generate_multiple_options = (self.src_lang == "en")
+            generate_multiple_options = not self.is_backtranslation
         self.num_return_sequences = num_beams if generate_multiple_options else 1
         self.generation_kwargs = {
             "num_beams": num_beams, "num_return_sequences": self.num_return_sequences, "length_penalty": length_penalty}
@@ -71,12 +83,20 @@ class MBart50Translator:
         self.model = AutoModelForSeq2SeqLM.from_pretrained(
             model_name).to(self.device)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        if tgt_lang == "en":
-            self.tokenizer.src_lang = LANG_CODE_TO_FAIRSEQ_FORMAT[self.src_lang]
-        else:
+        if tgt_lang != "en":
             self.generation_kwargs["forced_bos_token_id"] = self.tokenizer.lang_code_to_id[LANG_CODE_TO_FAIRSEQ_FORMAT[self.tgt_lang]]
 
         self.data_collator = DataCollatorForSeq2Seq(self.tokenizer)
+
+    @staticmethod
+    def _build_paths(dump_dir: str, dataset_name: str, src_lang: str, tgt_lang: str, num_examples: int, is_backtranslation: bool) -> tuple[str, str]:
+        dump_dir = Path(dump_dir)
+        bt_suffix = "_backtranslation" if is_backtranslation else ''
+        base_name = f"{dataset_name}_{src_lang}-{tgt_lang}_{num_examples}examples{bt_suffix}"
+        generations_dump_path = dump_dir / \
+            f"{base_name}_only_generations.jsonl"
+        metrics_dump_path = dump_dir / f"{base_name}.jsonl"
+        return generations_dump_path, metrics_dump_path
 
     def __call__(self) -> None:
         self._run_generation()
@@ -88,14 +108,18 @@ class MBart50Translator:
         batches = batch_indices(len(dataset), self.batch_size)
         for indices in tqdm(batches, desc="generating"):
             batch = dataset[indices]
-            gen_results = self._generate(batch)
-            inflated_batch = {k: np.repeat(
-                v, self.num_return_sequences).tolist() for k, v in batch.items()}
-            to_dump = {**inflated_batch, **gen_results}
+            input_ids, attention_mask, labels = self._prepare_batch(batch)
+            gen_results = self._generate(input_ids, attention_mask)
+            tgt_logprobs_results = self._calculate_target_logprobs(
+                input_ids, attention_mask, labels)
+            to_dump = {
+                **self._inflate_batch(batch), **gen_results, **self._inflate_batch(tgt_logprobs_results)}
             self._append_to_jsonlines_file(to_dump, self.generations_dump_path)
 
-    def _generate(self, batch: dict) -> dict[list]:
-        input_ids, attention_mask = self._prepare_batch_for_generation(batch)
+    def _inflate_batch(self, batch: dict) -> dict:
+        return {k: np.repeat(v, self.num_return_sequences).tolist() for k, v in batch.items()}
+
+    def _generate(self, input_ids: Tensor, attention_mask: Tensor) -> dict[str, list]:
         gen_output = self.model.generate(
             input_ids=input_ids, attention_mask=attention_mask,
             **self.generation_kwargs,
@@ -111,17 +135,53 @@ class MBart50Translator:
         scores = gen_output.sequences_scores.tolist()
         texts = self.tokenizer.batch_decode(
             gen_output.sequences, skip_special_tokens=True)
-        gen_results = {"gen_sequence": sequences,
-                       "gen_score": scores, "gen_text": texts}
+        gen_results = {f"{self.key_prefix}gen_sequence": sequences,
+                       f"{self.key_prefix}gen_score": scores,
+                       f"{self.key_prefix}gen_text": texts}
         return gen_results
 
-    def _prepare_batch_for_generation(self, batch: dict) -> tuple[Tensor, Tensor]:
-        model_inputs = {k: batch[k] for k in ["input_ids", "attention_mask"]}
+    def _calculate_target_logprobs(self, input_ids: Tensor, attention_mask: Tensor, labels: Tensor) -> dict[str, list]:
+        decoder_input_ids = torch.where(
+            labels != LABEL_PAD, labels, self.tokenizer.pad_token_id)
+        start_of_generation_eos_column = self.tokenizer.eos_token_id * \
+            labels.new_ones((labels.shape[0], 1))
+        decoder_input_ids = torch.concat(
+            [start_of_generation_eos_column, decoder_input_ids], dim=1)
+        decoder_attention_mask = (
+            decoder_input_ids != self.tokenizer.pad_token_id).int()
+
+        label_pad_column = LABEL_PAD * labels.new_ones((labels.shape[0], 1))
+        labels_for_loss = torch.concat(
+            [label_pad_column, labels[:, 1:], label_pad_column], dim=1)
+        forward_out = self.model(input_ids=input_ids, attention_mask=attention_mask,
+                                 decoder_input_ids=decoder_input_ids, decoder_attention_mask=decoder_attention_mask,
+                                 labels=labels_for_loss)
+
+        logprobs = forward_out.logits.log_softmax(dim=-1)
+        # without forced bos token, without extra predicted token at the end
+        logprobs = logprobs[:, 1:-1]
+        # without eos that starts generation, without forced bos token
+        labels = decoder_input_ids[:, 2:].unsqueeze(-1)
+        labels_mask = (labels != self.tokenizer.pad_token_id)
+        label_logprobs = logprobs.gather(index=labels, dim=-1)
+        label_logprobs = torch.where(
+            labels_mask, label_logprobs, logprobs.new([0.])).squeeze(-1)
+        sequence_logprobs = label_logprobs.sum(
+            dim=-1) / labels_mask.squeeze(-1).sum(dim=-1)
+        manual_loss = -label_logprobs.sum() / labels_mask.sum()
+        assert torch.allclose(forward_out.loss, manual_loss)
+        tgt_logprobs_results = {
+            f"{self.key_prefix}tgt_logprob": sequence_logprobs.tolist()}
+        return tgt_logprobs_results
+
+    def _prepare_batch(self, batch: dict) -> tuple[Tensor, Tensor, Tensor]:
+        keys = ["input_ids", "attention_mask", "labels"]
+        model_inputs = {key: batch[f"{self.key_prefix}{key}"] for key in keys}
         model_inputs = self.data_collator(
             dict_of_lists_to_list_of_dicts(model_inputs))
         model_inputs = {k: v.to(self.device) for k, v in model_inputs.items()}
-        input_ids, attention_mask = model_inputs["input_ids"], model_inputs["attention_mask"]
-        return input_ids, attention_mask
+        input_ids, attention_mask, labels = [model_inputs[k] for k in keys]
+        return input_ids, attention_mask, labels
 
     def _append_to_jsonlines_file(self, to_dump: dict[list], path: Path) -> None:
         path.parent.mkdir(exist_ok=True, parents=True)
@@ -129,7 +189,13 @@ class MBart50Translator:
         with jsonlines.open(path, 'a') as jsonl_writer:
             jsonl_writer.write_all(to_dump)
 
-    def _prepare_dataset(self, seed: int = 10) -> Dataset:
+    def _prepare_dataset(self) -> Dataset:
+        if not self.is_backtranslation:
+            return self._prepare_wmt_dataset()
+        else:
+            return self._prepare_backtranslation_dataset()
+
+    def _prepare_wmt_dataset(self, seed: int = 10) -> Dataset:
         src_sentences, tgt_sentences = self._load_sentences()
         dataset = Dataset.from_dict(
             {"src_sentence": src_sentences, "tgt_sentence": tgt_sentences, "id": range(len(src_sentences))})
@@ -137,8 +203,12 @@ class MBart50Translator:
         if self.num_examples is not None:
             perm = perm[:self.num_examples]
         dataset = dataset.select(perm)
-        dataset = dataset.map(self.tokenizer, batched=True,
-                              input_columns=["src_sentence"])
+        self.tokenizer.src_lang = self.tokenizer.LANG_CODE_TO_FAIRSEQ_FORMAT[self.src_lang]
+        dataset = dataset.map(self.tokenizer,
+                              batched=True, input_columns=["src_sentence"])
+        self.tokenizer.src_lang = self.tokenizer.LANG_CODE_TO_FAIRSEQ_FORMAT[self.tgt_lang]
+        dataset = dataset.map(lambda text: {"labels": self.tokenizer(text)["input_ids"]},
+                              batched=True, input_columns=["tgt_sentence"])
         return dataset
 
     def _load_sentences(self) -> tuple[list[str], list[str]]:
@@ -147,6 +217,17 @@ class MBart50Translator:
         src_sentences = read_lines(str(base_path) + ".src")
         tgt_sentences = read_lines(str(base_path) + ".ref")
         return src_sentences, tgt_sentences
+
+    def _prepare_backtranslation_dataset(self) -> Dataset:
+        dataset = Dataset.from_json(str(self.orig_dump_path))
+        input_ids = dataset["gen_sequence"]
+        attention_mask = [[1]*len(x) for x in input_ids]
+        labels = dataset["input_ids"]
+        dataset = dataset.add_column(f"{self.key_prefix}input_ids", input_ids)
+        dataset = dataset.add_column(
+            f"{self.key_prefix}attention_mask", attention_mask)
+        dataset = dataset.add_column(f"{self.key_prefix}labels", labels)
+        return dataset
 
     def _run_metrics_calculation(self) -> None:
         assert not self.metrics_dump_path.exists()
@@ -158,22 +239,25 @@ class MBart50Translator:
         gen_dataset = Dataset.from_json(str(self.generations_dump_path))
 
         batches = batch_indices(len(gen_dataset), self.bertscore_batch_size)
+        target_text_column = "tgt_sentence" if not self.is_backtranslation else "src_sentence"
         for indices in tqdm(batches, desc="calculating metrics"):
             batch = gen_dataset[indices]
-            gen_texts, tgt_sentences = batch["gen_text"], batch["tgt_sentence"]
+            gen_texts, tgt_sentences = batch[f"{self.key_prefix}gen_text"], batch[target_text_column]
             precisions, recalls, f1s = self.bert_scorer.score(
                 cands=gen_texts, refs=tgt_sentences)
-            metrics_results = {"bertscore_f1": f1s.tolist(),
-                               "bertscore_precision": precisions.tolist(),
-                               "bertscore_recall": recalls.tolist()}
-            metrics_results["bleu_score"] = [
+            metrics_results = {f"{self.key_prefix}bertscore_f1": f1s.tolist(),
+                               f"{self.key_prefix}bertscore_precision": precisions.tolist(),
+                               f"{self.key_prefix}bertscore_recall": recalls.tolist()}
+            metrics_results[f"{self.key_prefix}bleu_score"] = [
                 sacrebleu(pred=gen, label=tgt) for gen, tgt in zip(gen_texts, tgt_sentences)]
             for rouge_key in ("rougeL", "rouge2", "rouge1"):
                 rouge_scores = [rouge(pred=gen, label=tgt, rouge_key=rouge_key)
                                 for gen, tgt in zip(gen_texts, tgt_sentences)]
-                metrics_results[f"{rouge_key}_score"] = rouge_scores
+                metrics_results[f"{self.key_prefix}{rouge_key}_score"] = rouge_scores
             to_dump = {**batch, **metrics_results}
             self._append_to_jsonlines_file(to_dump, self.metrics_dump_path)
+
+        self.generation_dump_path.unlink()
 
     def _load_bert_scorer(self) -> BERTScorer:
         bertscore_baseline_languages = [path.name for path in (
