@@ -44,7 +44,8 @@ class MBart50Translator:
                  num_beams: int = 5,
                  max_output_to_input_ratio: float = 2.,
                  length_penalty: float = 1.0,
-                 generate_multiple_options: Union[str, bool] = "auto",
+                 #  generate_multiple_options: Union[str, bool] = "auto",
+                 generate_multiple_options: Union[str, bool] = True,
                  ) -> None:
         assert "en" in (src_lang, tgt_lang)
         assert {src_lang, tgt_lang}.issubset(
@@ -264,8 +265,6 @@ class MBart50Translator:
             self._append_to_jsonlines_file(to_dump, self.metrics_dump_path)
 
         self.generations_dump_path.unlink()
-        if self.orig_dump_path is not None:
-            self.orig_dump_path.unlink()
 
     def _load_bert_scorer(self) -> BERTScorer:
         bertscore_baseline_languages = [path.name for path in (
