@@ -42,9 +42,10 @@ class MBart50Translator:
                  device: str = "cuda:0",
                  dataset_name: str = "wmt20",
                  num_beams: int = 5,
+                 num_beam_groups: int = 1,
+                 diversity_penalty: float = 0.5,  # only matters if num_beam_groups != 1
                  max_output_to_input_ratio: float = 2.,
                  length_penalty: float = 1.0,
-                 #  generate_multiple_options: Union[str, bool] = "auto",
                  generate_multiple_options: Union[str, bool] = True,
                  ) -> None:
         assert "en" in (src_lang, tgt_lang)
@@ -74,11 +75,10 @@ class MBart50Translator:
         self.generations_dump_path, self.metrics_dump_path = self._build_paths(
             dump_dir, dataset_name, src_lang, tgt_lang, num_examples, is_backtranslation)
 
-        if generate_multiple_options == "auto":
-            generate_multiple_options = not self.is_backtranslation
         self.num_return_sequences = num_beams if generate_multiple_options else 1
         self.generation_kwargs = {
-            "num_beams": num_beams, "num_return_sequences": self.num_return_sequences, "length_penalty": length_penalty}
+            "num_beams": num_beams, "num_return_sequences": self.num_return_sequences, "length_penalty": length_penalty,
+            "num_beam_groups": num_beam_groups, "diversity_penalty": diversity_penalty}
 
         model_name = "facebook/mbart-large-50-many-to-one-mmt" if tgt_lang == "en" else "facebook/mbart-large-50-one-to-many-mmt"
         self.model = AutoModelForSeq2SeqLM.from_pretrained(

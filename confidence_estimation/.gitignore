@@ -2,5 +2,5 @@ metrics
 wmt19_dev*
 openai_dump
 data
-mbart50_dumps
+mbart50_dumps*
 slurm_logs
